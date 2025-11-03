@@ -6,6 +6,8 @@
 (define-constant ERR-ALREADY-SUBMITTED (err u409))
 (define-constant ERR-NO-SUBMISSIONS (err u405))
 (define-constant ERR-ALREADY-REWARDED (err u410))
+(define-constant ERR-ENDORSEMENT-EXISTS (err u411))
+(define-constant ERR-SELF-ENDORSEMENT (err u412))
 
 (define-data-var bounty-counter uint u0)
 (define-data-var submission-counter uint u0)
@@ -48,6 +50,16 @@
 (define-map user-submissions
     { user: principal }
     { submission-ids: (list 100 uint) }
+)
+
+(define-map submission-endorsements
+    { submission-id: uint, endorser: principal }
+    { endorsed-at: uint }
+)
+
+(define-map submission-endorsement-count
+    { submission-id: uint }
+    { count: uint }
 )
 
 (define-private (is-bounty-creator (bounty-id uint) (user principal))
@@ -232,4 +244,46 @@
 
 (define-read-only (get-contract-balance)
     (stx-get-balance (as-contract tx-sender))
+)
+
+(define-public (endorse-submission (submission-id uint))
+    (let ((submission-info (unwrap! (map-get? submissions { submission-id: submission-id }) ERR-NOT-FOUND))
+          (submitter (get submitter submission-info))
+          (current-count (default-to u0 (get count (map-get? submission-endorsement-count { submission-id: submission-id })))))
+        (asserts! (not (is-eq tx-sender submitter)) ERR-SELF-ENDORSEMENT)
+        (asserts! (is-none (map-get? submission-endorsements { submission-id: submission-id, endorser: tx-sender })) ERR-ENDORSEMENT-EXISTS)
+        (map-set submission-endorsements
+            { submission-id: submission-id, endorser: tx-sender }
+            { endorsed-at: stacks-block-height }
+        )
+        (map-set submission-endorsement-count
+            { submission-id: submission-id }
+            { count: (+ current-count u1) }
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-submission-endorsement-count (submission-id uint))
+    (default-to u0 (get count (map-get? submission-endorsement-count { submission-id: submission-id })))
+)
+
+(define-read-only (has-endorsed-submission (submission-id uint) (endorser principal))
+    (is-some (map-get? submission-endorsements { submission-id: submission-id, endorser: endorser }))
+)
+
+(define-read-only (get-top-endorsed-submission (bounty-id uint) (submission-ids (list 100 uint)))
+    (fold check-endorsement-count submission-ids { top-id: u0, top-count: u0, bounty-id: bounty-id })
+)
+
+(define-private (check-endorsement-count (submission-id uint) (state { top-id: uint, top-count: uint, bounty-id: uint }))
+    (let ((submission-info (map-get? submissions { submission-id: submission-id }))
+          (endorsement-count (default-to u0 (get count (map-get? submission-endorsement-count { submission-id: submission-id })))))
+        (match submission-info
+            info (if (and (is-eq (get bounty-id info) (get bounty-id state)) (> endorsement-count (get top-count state)))
+                     { top-id: submission-id, top-count: endorsement-count, bounty-id: (get bounty-id state) }
+                     state)
+            state
+        )
+    )
 )
